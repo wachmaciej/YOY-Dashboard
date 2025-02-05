@@ -38,6 +38,10 @@ if not uploaded_sales or not uploaded_skus:
     st.warning("Please upload both the Sales Revenue CSV and SKU Data Excel file to proceed.")
     st.stop()
 
+# Display the names of the uploaded raw files
+st.info(f"Raw Sales Data File: {uploaded_sales.name}")
+st.info(f"Raw SKU Data File: {uploaded_skus.name}")
+
 # =============================================================================
 # DATA LOADING & CLEANING FUNCTIONS
 # =============================================================================
@@ -71,6 +75,7 @@ def clean_sap_data(df: pd.DataFrame) -> pd.DataFrame:
     }, inplace=True)
     drop_cols = ['Unnamed: 8', 'Product Category', 'Unnamed: 4', 'G/L Account', 'Product Name']
     df.drop(columns=[c for c in drop_cols if c in df.columns], inplace=True)
+    
     def clean_quantity(value):
         if isinstance(value, str):
             match = re.search(r'-?([\d,]+)', value)
@@ -79,12 +84,14 @@ def clean_sap_data(df: pd.DataFrame) -> pd.DataFrame:
         elif isinstance(value, (int, float)):
             return abs(value)
         return value
+
     def extract_currency(value):
         if isinstance(value, str):
             match = re.search(r'([A-Z]{3})$', value)
             if match:
                 return match.group(1)
         return None
+
     df['Original Currency'] = df['Sales Value in Transaction Currency'].apply(extract_currency)
     df['Sales Value in Transaction Currency'] = df['Sales Value in Transaction Currency'].apply(clean_quantity)
     df['Order Quantity'] = df['Order Quantity'].apply(clean_quantity)
@@ -174,19 +181,47 @@ def simplify_order_source(value):
     return value
 
 # ---------------------------
-# LOAD, CLEAN & MERGE DATA
+# LOAD, CLEAN & MERGE DATA WITH PROGRESS BAR
 # ---------------------------
-sales_df, sku_df = load_data(uploaded_sales, uploaded_skus)
-sap_df = clean_sap_data(sales_df)
-df = merge_sku_data(sap_df, sku_df)
+progress_bar = st.progress(0)
+status_text = st.empty()
 
+# Step 1: Load Data
+status_text.text("Loading data...")
+sales_df, sku_df = load_data(uploaded_sales, uploaded_skus)
+progress_bar.progress(20)
+
+# Step 2: Clean Sales Data
+status_text.text("Cleaning sales data...")
+sap_df = clean_sap_data(sales_df)
+progress_bar.progress(50)
+
+# Step 3: Merge SKU Data
+status_text.text("Merging SKU data...")
+df = merge_sku_data(sap_df, sku_df)
+progress_bar.progress(70)
+
+# Step 4: Apply additional cleaning transformations
+status_text.text("Applying additional cleaning transformations...")
 if 'Revenue Region' in df.columns:
     df['Revenue Region'] = df['Revenue Region'].apply(clean_sales_revenue)
 if 'Sales Channel' in df.columns:
     df['Sales Channel'] = df['Sales Channel'].apply(simplify_order_source)
+progress_bar.progress(90)
 
-st.subheader("Cleaned Data Preview")
-st.dataframe(df.head())
+# Step 5: Finalize Data Cleaning
+progress_bar.progress(100)
+status_text.text("Data cleaning complete!")
+st.success("Data cleaning complete!")
+
+# --- Provide a download button for the cleaned data ---
+csv = df.to_csv(index=False).encode('utf-8')
+st.download_button(
+    label="Download Cleaned Data as CSV",
+    data=csv,
+    file_name="cleaned_data.csv",
+    mime="text/csv"
+)
 
 # =============================================================================
 # DASHBOARD HELPER FUNCTIONS (KPIs, Charts, etc.)
@@ -223,7 +258,15 @@ def week_monday(row):
     except Exception:
         return None
 
-def create_yoy_trends_chart(data, selected_years, selected_quarters, selected_channels=None, selected_listings=None, selected_products=None):
+# =============================================================================
+# CACHED HEAVY FUNCTION: GROUPING DATA FOR YOY TRENDS
+# =============================================================================
+@st.cache_data(show_spinner=False)
+def get_yoy_grouped_data(data, selected_years, selected_quarters, selected_channels, selected_listings, selected_products):
+    """
+    Filter and group the data based on the YOY filter parameters.
+    Returns both the grouped DataFrame and the filtered DataFrame.
+    """
     filtered = data.copy()
     if selected_years:
         filtered = filtered[filtered["Year"].isin(selected_years)]
@@ -240,6 +283,11 @@ def create_yoy_trends_chart(data, selected_years, selected_quarters, selected_ch
         filtered.groupby(["Year", "Week"])["Sales Value (£)"]
         .sum().reset_index().sort_values(by=["Year", "Week"])
     )
+    return weekly_rev, filtered
+
+def create_yoy_trends_chart(data, selected_years, selected_quarters, selected_channels=None, selected_listings=None, selected_products=None):
+    # Use the cached heavy function to obtain grouped data.
+    weekly_rev, filtered = get_yoy_grouped_data(data, selected_years, selected_quarters, selected_channels, selected_listings, selected_products)
     weekly_rev["RevenueK"] = weekly_rev["Sales Value (£)"] / 1000
     if not filtered.empty:
         min_week, max_week = int(filtered["Week"].min()), int(filtered["Week"].max())
